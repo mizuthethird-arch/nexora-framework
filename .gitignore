@@ -1,0 +1,35 @@
+# Go binaries and build outputs
+/bin/
+/build/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test outputs
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Environment & secrents
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
