@@ -154,6 +154,9 @@ func (a *App) Run(ctx context.Context) error {
 		a.mu.Unlock()
 	}()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	components := make([]Lifecycle, 0, len(registrations))
 
 	for _, registration := range registrations {
@@ -169,10 +172,10 @@ func (a *App) Run(ctx context.Context) error {
 	// Initialization phase
 	for i, component := range components {
 		if err := initializeLifecycle(
-			ctx,
+			runCtx,
 			[]Lifecycle{component},
 		); err != nil {
-			shutdownCtx := context.WithoutCancel(ctx)
+			shutdownCtx := context.WithoutCancel(runCtx)
 
 			return errors.Join(
 				fmt.Errorf(
@@ -193,10 +196,10 @@ func (a *App) Run(ctx context.Context) error {
 	// Startup phase
 	for i, component := range initialized {
 		if err := startLifecycle(
-			ctx,
+			runCtx,
 			[]Lifecycle{component},
 		); err != nil {
-			shutdownCtx := context.WithoutCancel(ctx)
+			shutdownCtx := context.WithoutCancel(runCtx)
 
 			return errors.Join(
 				fmt.Errorf(
@@ -218,12 +221,12 @@ func (a *App) Run(ctx context.Context) error {
 		started = append(started, component)
 	}
 
-	<-ctx.Done()
+	<-runCtx.Done()
 
-	shutdownCtx := context.WithoutCancel(ctx)
+	shutdownCtx := context.WithoutCancel(runCtx)
 
 	return errors.Join(
-		ctx.Err(),
+		runCtx.Err(),
 		stopLifecycle(shutdownCtx, started),
 		releaseLifecycle(shutdownCtx, initialized),
 	)
