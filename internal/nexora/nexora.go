@@ -4,45 +4,214 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+)
+
+type appState uint8
+
+const (
+	appStateConfiguring appState = iota
+	appStateRunning
+	appStateStopped
 )
 
 type App struct {
-	lifecycle []Lifecycle
+	mu            sync.Mutex
+	state         appState
+	registrations []Registration
 }
 
 func New() *App {
-	return &App{}
+	return &App{
+		state: appStateConfiguring,
+	}
 }
 
+// Add registers a lifecycle component using an automatically generated name
 func (a *App) Add(component Lifecycle) {
-	a.lifecycle = append(a.lifecycle, component)
+	if a == nil {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.state != appStateConfiguring {
+		return
+	}
+
+	// Find an unused generated name
+	var name string
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("component-%d", i)
+
+		exists := false
+		for _, registration := range a.registrations {
+			if registration.Name == candidate {
+				exists = true
+				break
+			}
+		}
+
+		if !exists {
+			name = candidate
+			break
+		}
+	}
+
+	a.registrations = append(
+		a.registrations,
+		Registration{
+			Name:      name,
+			Component: component,
+		},
+	)
+
 }
 
-func (a *App) Run(ctx context.Context) error {
-	initialized := make([]Lifecycle, 0, len(a.lifecycle))
-	started := make([]Lifecycle, 0, len(a.lifecycle))
+func (a *App) Register(registration Registration) error {
+	if a == nil {
+		return errors.New("register component: app is nil")
+	}
 
-	for i, component := range a.lifecycle {
-		if err := initializeLifecycle(ctx, []Lifecycle{component}); err != nil {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.state != appStateConfiguring {
+		return errors.New(
+			"register component: application registration is closed",
+		)
+	}
+
+	if err := validateRegistration(registration); err != nil {
+		return err
+	}
+
+	for _, existing := range a.registrations {
+		if existing.Name == registration.Name {
+			return fmt.Errorf(
+				"register component %q: name is already registered",
+				registration.Name,
+			)
+		}
+	}
+
+	registration.DependsOn = append(
+		[]string(nil),
+		registration.DependsOn...,
+	)
+
+	a.registrations = append(
+		a.registrations,
+		registration,
+	)
+
+	return nil
+
+}
+
+// Run initializes, starts, supervises, and shuts down the application
+func (a *App) Run(ctx context.Context) error {
+	if a == nil {
+		return errors.New("run application: app is nil")
+	}
+
+	if ctx == nil {
+		return errors.New("run application: context must not be nil")
+	}
+
+	// Validate snapshots and trasition state atomically
+	a.mu.Lock()
+
+	if a.state != appStateConfiguring {
+		a.mu.Unlock()
+
+		return errors.New(
+			"run application: application has already been started",
+		)
+	}
+
+	if err := validateComposition(a.registrations); err != nil {
+		a.mu.Unlock()
+
+		return fmt.Errorf(
+			"validate application composition: %w",
+			err,
+		)
+	}
+
+	registrations := append(
+		[]Registration(nil),
+		a.registrations...,
+	)
+
+	a.state = appStateRunning
+	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		a.state = appStateStopped
+		a.mu.Unlock()
+	}()
+
+	components := make([]Lifecycle, 0, len(registrations))
+
+	for _, registration := range registrations {
+		components = append(
+			components,
+			registration.Component,
+		)
+	}
+
+	initialized := make([]Lifecycle, 0, len(components))
+	started := make([]Lifecycle, 0, len(components))
+
+	// Initialization phase
+	for i, component := range components {
+		if err := initializeLifecycle(
+			ctx,
+			[]Lifecycle{component},
+		); err != nil {
 			shutdownCtx := context.WithoutCancel(ctx)
 
 			return errors.Join(
-				fmt.Errorf("initialize component %d: %w", i, err),
-				releaseLifecycle(shutdownCtx, initialized),
+				fmt.Errorf(
+					"initialize component %q: %w",
+					registrations[i].Name,
+					err,
+				),
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
 			)
 		}
 
 		initialized = append(initialized, component)
 	}
 
+	// Startup phase
 	for i, component := range initialized {
-		if err := startLifecycle(ctx, []Lifecycle{component}); err != nil {
+		if err := startLifecycle(
+			ctx,
+			[]Lifecycle{component},
+		); err != nil {
 			shutdownCtx := context.WithoutCancel(ctx)
 
 			return errors.Join(
-				fmt.Errorf("start component %d, %w", i, err),
-				stopLifecycle(shutdownCtx, started),
-				releaseLifecycle(shutdownCtx, initialized),
+				fmt.Errorf(
+					"start component %q: %w",
+					registrations[i].Name,
+					err,
+				),
+				stopLifecycle(
+					shutdownCtx,
+					started,
+				),
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
 			)
 		}
 
