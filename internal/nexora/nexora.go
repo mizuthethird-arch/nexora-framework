@@ -171,6 +171,18 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Initialization phase
 	for i, component := range components {
+		if err := runCtx.Err(); err != nil {
+			shutdownCtx := context.WithoutCancel(runCtx)
+
+			return errors.Join(
+				err,
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
+			)
+		}
+
 		if err := initializeLifecycle(
 			runCtx,
 			[]Lifecycle{component},
@@ -191,10 +203,38 @@ func (a *App) Run(ctx context.Context) error {
 		}
 
 		initialized = append(initialized, component)
+
+		if err := runCtx.Err(); err != nil {
+			shutdownCtx := context.WithoutCancel(runCtx)
+
+			return errors.Join(
+				err,
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
+			)
+		}
 	}
 
 	// Startup phase
 	for i, component := range initialized {
+		if err := runCtx.Err(); err != nil {
+			shutdownCtx := context.WithoutCancel(runCtx)
+
+			return errors.Join(
+				err,
+				stopLifecycle(
+					shutdownCtx,
+					started,
+				),
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
+			)
+		}
+
 		if err := startLifecycle(
 			runCtx,
 			[]Lifecycle{component},
@@ -219,6 +259,22 @@ func (a *App) Run(ctx context.Context) error {
 		}
 
 		started = append(started, component)
+
+		if err := runCtx.Err(); err != nil {
+			shutdownCtx := context.WithoutCancel(runCtx)
+
+			return errors.Join(
+				err,
+				stopLifecycle(
+					shutdownCtx,
+					started,
+				),
+				releaseLifecycle(
+					shutdownCtx,
+					initialized,
+				),
+			)
+		}
 	}
 
 	<-runCtx.Done()

@@ -41,6 +41,46 @@ func (c *appTestComponent) Release(ctx context.Context) error {
 	return c.releaseErr
 }
 
+type cancellationDuringLifecycleComponent struct {
+	name       string
+	events     *[]string
+	entered chan struct{}
+}
+
+func (c *cancellationDuringLifecycleComponent) Initialize(ctx context.Context) error {
+	*c.events = append(*c.events, c.name+".initialize")
+
+	if c.entered != nil {
+		close(c.entered)
+	}
+
+	<-ctx.Done()
+
+	return nil
+}
+
+func (c *cancellationDuringLifecycleComponent) Start(ctx context.Context) error {
+	*c.events = append(*c.events, c.name+".start")
+
+	if c.entered != nil {
+		close(c.entered)
+	}
+
+	<-ctx.Done()
+
+	return nil
+}
+
+func (c *cancellationDuringLifecycleComponent) Stop(ctx context.Context) error {
+	*c.events = append(*c.events, c.name+".stop")
+	return nil
+}
+
+func (c *cancellationDuringLifecycleComponent) Release(context.Context) error {
+	*c.events = append(*c.events, c.name+".release")
+	return nil
+}
+
 type cancellationOwnershipComponent struct {
 	initializeCtx context.Context
 	startCtx      context.Context
@@ -119,21 +159,34 @@ func TestAppRunOwnsLifecycleCancellationContext(t *testing.T) {
 
 func TestAppRunPropagatesParentCancellation(t *testing.T) {
 	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	component := &cancellationOwnershipComponent{}
+	entered := make(chan struct{})
+	var events []string
+
+	component := &cancellationDuringLifecycleComponent{
+		name:	"A",
+		events:	&events,
+		entered: entered,
+	}
 
 	app := New()
 	app.Add(component)
 
 	done := make(chan error, 1)
-
+	
 	go func() {
 		done <- app.Run(parentCtx)
 	}()
 
-	cancel()
+	select{
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle did not start")
+	}
 
-	select {
+	cancel()
+	select{
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf(
@@ -146,18 +199,29 @@ func TestAppRunPropagatesParentCancellation(t *testing.T) {
 		t.Fatal("application did not stop after parent cancellation")
 	}
 
-	if component.initializeCtx == nil {
-		t.Fatal("initialize did not receive a context")
+	expected := []string{
+		"A.initialize",
+		"A.release",
 	}
 
-	if !errors.Is(
-		component.initializeCtx.Err(),
-		context.Canceled,
-	) {
+	if len(events) != len(expected) {
 		t.Fatalf(
-			"expected Runtime-owned context to be canceled, got %v",
-			component.initializeCtx.Err(),
+			"expected %d events, got %d: %v",
+			len(expected),
+			len(events),
+			events,
 		)
+	}
+
+	for i := range expected {
+		if events[i] != expected[i] {
+			t.Errorf(
+				"event %d: ecpected %q, got %q",
+				i,
+				expected[i],
+				events[i],
+			)
+		}
 	}
 }
 
